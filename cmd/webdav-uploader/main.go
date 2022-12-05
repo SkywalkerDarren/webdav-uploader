@@ -1,52 +1,113 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"io/fs"
 	"os"
 	"path"
 	"path/filepath"
+	"time"
 
 	"github.com/studio-b12/gowebdav"
 )
 
 func main() {
-	c, err := connectWebdav()
+	cfg := initCmd()
+	if cfg == nil {
+		return
+	}
+	c, err := connectWebdav(cfg.WebDavUrl, cfg.User, cfg.Password)
 	if err != nil {
 		return
 	}
-	localPath := "."
-	remotePath := path.Join("share", "webdav")
-	err = uploadToDav(localPath, c, remotePath)
+	err = uploadToDav(cfg.LocalPath, c, cfg.RemotePath)
 	if err != nil {
-		fmt.Printf("err: %v\n", err)
+		errFile := fmt.Sprintf("error-%s.txt", time.Now().Format("2006-01-02-15-04-05"))
+		err := os.WriteFile(errFile, []byte(err.Error()), 0644)
+		if err != nil {
+			return
+		}
 		return
 	}
 	fmt.Printf("ok")
 }
 
-func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error {
-	return filepath.Walk(localPath, func(p string, info fs.FileInfo, err error) error {
-		if info.IsDir() {
-			if info.Name() == "." {
-				return nil
-			}
-			err := makeDir(p, c, remotePath)
-			if err != nil {
-				return err
-			}
-		} else {
-			err := uploadFile(p, c, remotePath)
-			if err != nil {
-				return err
-			}
-		}
+func initCmd() *Config {
+	cfg := &Config{}
+	flag.StringVar(&cfg.LocalPath, "local", "", "local path")
+	flag.StringVar(&cfg.RemotePath, "remote", "", "remote path")
+	flag.StringVar(&cfg.WebDavUrl, "url", "", "webdav url")
+	flag.StringVar(&cfg.User, "user", "", "user")
+	flag.StringVar(&cfg.Password, "pwd", "", "password")
+	flag.Parse()
+	if cfg.LocalPath == "" {
+		fmt.Println("local path is empty")
 		return nil
-	})
+	}
+	if cfg.RemotePath == "" {
+		fmt.Println("remote path is empty")
+		return nil
+	}
+	if cfg.WebDavUrl == "" {
+		fmt.Println("webdav url is empty")
+		return nil
+	}
+	if cfg.User == "" {
+		fmt.Println("user is empty")
+		return nil
+	}
+	if cfg.Password == "" {
+		fmt.Println("password is empty")
+		return nil
+	}
+	return cfg
 }
 
-func makeDir(p string, c *gowebdav.Client, remotePath string) error {
-	err := c.Mkdir(path.Join(remotePath, p), 0644)
+type Config struct {
+	WebDavUrl  string
+	User       string
+	Password   string
+	LocalPath  string
+	RemotePath string
+}
+
+func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error {
+	localPath = path.Clean(localPath)
+
+	stat, err := os.Stat(localPath)
+	if err != nil {
+		return err
+	}
+
+	if stat.IsDir() {
+		return filepath.Walk(localPath, func(p string, info fs.FileInfo, err error) error {
+			if p[len(localPath):] == "" {
+				return nil
+			}
+			relativePath := p[len(localPath)+1:]
+
+			if info.IsDir() {
+				err := makeDir(c, path.Join(remotePath, relativePath))
+				if err != nil {
+					return err
+				}
+			} else {
+				err := uploadFile(p, c, path.Join(remotePath, relativePath))
+				if err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	} else {
+		fileName := localPath[len(path.Dir(localPath))+1:]
+		return uploadFile(localPath, c, path.Join(remotePath, fileName))
+	}
+}
+
+func makeDir(c *gowebdav.Client, remotePath string) error {
+	err := c.Mkdir(remotePath, 0644)
 	if err != nil {
 		return err
 	}
@@ -59,17 +120,14 @@ func uploadFile(p string, c *gowebdav.Client, remotePath string) error {
 	if err != nil {
 		return err
 	}
-	err = c.WriteStream(path.Join(remotePath, p), file, 0644)
+	err = c.WriteStream(remotePath, file, 0644)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func connectWebdav() (*gowebdav.Client, error) {
-	webDavUrl := os.Getenv("WEBDAV_URL")
-	user := os.Getenv("DAV_USER")
-	password := os.Getenv("DAV_PWD")
+func connectWebdav(webDavUrl, user, password string) (*gowebdav.Client, error) {
 	c := gowebdav.NewClient(webDavUrl, user, password)
 	err := c.Connect()
 	if err != nil {
