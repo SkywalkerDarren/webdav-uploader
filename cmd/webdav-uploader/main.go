@@ -1,36 +1,34 @@
 package main
 
 import (
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"path"
 	"path/filepath"
-	"time"
 
 	"github.com/studio-b12/gowebdav"
 )
 
 func main() {
+	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := initCmd()
 	if cfg == nil {
 		return
 	}
 	c, err := connectWebdav(cfg.WebDavUrl, cfg.User, cfg.Password)
 	if err != nil {
+		fmt.Println(err)
 		return
 	}
 	err = uploadToDav(cfg.LocalPath, c, cfg.RemotePath)
 	if err != nil {
-		errFile := fmt.Sprintf("error-%s.txt", time.Now().Format("2006-01-02-15-04-05"))
-		err := os.WriteFile(errFile, []byte(err.Error()), 0644)
-		if err != nil {
-			return
-		}
+		fmt.Println(err)
 		return
 	}
-	fmt.Printf("ok")
 }
 
 func initCmd() *Config {
@@ -86,6 +84,9 @@ func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error 
 				return nil
 			}
 			relativePath := p[len(localPath)+1:]
+			if localPath == "." {
+				relativePath = p
+			}
 
 			if info.IsDir() {
 				err := makeDir(c, path.Join(remotePath, relativePath))
