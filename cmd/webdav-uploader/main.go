@@ -7,8 +7,9 @@ import (
 	"io/fs"
 	"net/http"
 	"os"
-	"path"
 	"path/filepath"
+	"runtime"
+	"strings"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -21,12 +22,12 @@ func main() {
 	}
 	c, err := connectWebdav(cfg.WebDavUrl, cfg.User, cfg.Password)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("can not connect to webdav", err)
 		return
 	}
 	err = uploadToDav(cfg.LocalPath, c, cfg.RemotePath)
 	if err != nil {
-		fmt.Println(err)
+		fmt.Println("can not upload to webdav", err)
 		return
 	}
 }
@@ -71,7 +72,7 @@ type Config struct {
 }
 
 func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error {
-	localPath = path.Clean(localPath)
+	localPath = filepath.Clean(localPath)
 
 	stat, err := os.Stat(localPath)
 	if err != nil {
@@ -89,12 +90,12 @@ func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error 
 			}
 
 			if info.IsDir() {
-				err := makeDir(c, path.Join(remotePath, relativePath))
+				err := makeDir(c, urlPathJoin(remotePath, relativePath))
 				if err != nil {
 					return err
 				}
 			} else {
-				err := uploadFile(p, c, path.Join(remotePath, relativePath))
+				err := uploadFile(p, c, urlPathJoin(remotePath, relativePath))
 				if err != nil {
 					return err
 				}
@@ -102,8 +103,17 @@ func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error 
 			return nil
 		})
 	} else {
-		fileName := localPath[len(path.Dir(localPath))+1:]
-		return uploadFile(localPath, c, path.Join(remotePath, fileName))
+		fileName := localPath[len(filepath.Dir(localPath))+1:]
+		return uploadFile(localPath, c, urlPathJoin(remotePath, fileName))
+	}
+}
+
+func urlPathJoin(p ...string) string {
+	s := filepath.Join(p...)
+	if runtime.GOOS == "windows" {
+		return strings.ReplaceAll(s, "\\", "/")
+	} else {
+		return s
 	}
 }
 
