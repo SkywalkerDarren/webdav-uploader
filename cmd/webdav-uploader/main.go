@@ -1,15 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -20,12 +23,17 @@ func main() {
 	if cfg == nil {
 		return
 	}
-	c, err := connectWebdav(cfg.WebDavUrl, cfg.User, cfg.Password)
+	client := &webDavClient{
+		baseUrl: cfg.WebDavUrl,
+		user:    cfg.User,
+		pass:    cfg.Password,
+	}
+	err := client.New().Connect()
 	if err != nil {
 		fmt.Println("can not connect to webdav", err)
 		return
 	}
-	err = uploadToDav(cfg.LocalPath, c, cfg.RemotePath)
+	err = uploadToDav(cfg.LocalPath, cfg.RemotePath, client)
 	if err != nil {
 		fmt.Println("can not upload to webdav", err)
 		return
@@ -71,7 +79,7 @@ type Config struct {
 	RemotePath string
 }
 
-func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error {
+func uploadToDav(localPath string, remotePath string, client *webDavClient) error {
 	localPath = filepath.Clean(localPath)
 
 	stat, err := os.Stat(localPath)
@@ -90,12 +98,12 @@ func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error 
 			}
 
 			if info.IsDir() {
-				err := makeDir(c, urlPathJoin(remotePath, relativePath))
+				err := makeDir(client, urlPathJoin(remotePath, relativePath))
 				if err != nil {
 					return err
 				}
 			} else {
-				err := uploadFile(p, c, urlPathJoin(remotePath, relativePath))
+				err := uploadFile(client, p, urlPathJoin(remotePath, relativePath))
 				if err != nil {
 					return err
 				}
@@ -104,7 +112,7 @@ func uploadToDav(localPath string, c *gowebdav.Client, remotePath string) error 
 		})
 	} else {
 		fileName := localPath[len(filepath.Dir(localPath))+1:]
-		return uploadFile(localPath, c, urlPathJoin(remotePath, fileName))
+		return uploadFile(client, localPath, urlPathJoin(remotePath, fileName))
 	}
 }
 
@@ -117,7 +125,8 @@ func urlPathJoin(p ...string) string {
 	}
 }
 
-func makeDir(c *gowebdav.Client, remotePath string) error {
+func makeDir(client *webDavClient, remotePath string) error {
+	c := client.New()
 	err := c.Mkdir(remotePath, 0644)
 	if err != nil {
 		return err
@@ -125,24 +134,91 @@ func makeDir(c *gowebdav.Client, remotePath string) error {
 	return nil
 }
 
-func uploadFile(p string, c *gowebdav.Client, remotePath string) error {
+func uploadFile(client *webDavClient, p string, remotePath string) error {
 	file, err := os.Open(p)
-	defer file.Close()
 	if err != nil {
 		return err
 	}
-	err = c.WriteStream(remotePath, file, 0644)
+	defer file.Close()
+
+	readerChan := make(chan fileChunk)
+	var wg sync.WaitGroup
+
+	go func() {
+		maxReadSize := 1024 * 1024 * 32
+		err := readFile(p, maxReadSize, readerChan)
+		close(readerChan)
+		if err != nil {
+			fmt.Printf("read file filed, err: %v\n", err)
+		}
+	}()
+
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go uploadFileSplit(&wg, readerChan, client, remotePath)
+	}
+
+	wg.Wait()
+	return nil
+}
+
+func readFile(path string, maxReadSize int, readerChan chan fileChunk) error {
+	f, err := os.Open(path)
 	if err != nil {
 		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	// read file to channel
+	for i := 0; ; i++ {
+		buf := make([]byte, maxReadSize)
+		n, err := f.Read(buf)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+		readerChan <- fileChunk{
+			Offset: int64(i * maxReadSize),
+			Length: int64(n),
+			Buf:    buf[:n],
+			Size:   fi.Size(),
+		}
 	}
 	return nil
 }
 
-func connectWebdav(webDavUrl, user, password string) (*gowebdav.Client, error) {
-	c := gowebdav.NewClient(webDavUrl, user, password)
-	err := c.Connect()
-	if err != nil {
-		return nil, err
+func uploadFileSplit(wg *sync.WaitGroup, readerChan chan fileChunk, client *webDavClient, remotePath string) {
+	defer wg.Done()
+	for chunk := range readerChan {
+		fmt.Printf("chunk: %d %d %d\n", chunk.Offset, chunk.Offset+chunk.Length, chunk.Size)
+		c := client.New()
+		c.SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", chunk.Offset, chunk.Offset+chunk.Length-1, chunk.Size))
+		err := c.WriteStream(remotePath, bytes.NewBuffer(chunk.Buf), 0644)
+		if err != nil {
+			fmt.Printf("upload file split failed, err: %v\n", err)
+		}
 	}
-	return c, nil
+}
+
+type fileChunk struct {
+	Offset int64
+	Length int64
+	Buf    []byte
+	Size   int64
+}
+
+type webDavClient struct {
+	baseUrl string
+	user    string
+	pass    string
+}
+
+func (w *webDavClient) New() *gowebdav.Client {
+	return gowebdav.NewClient(w.baseUrl, w.user, w.pass)
 }
