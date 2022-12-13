@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -13,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/studio-b12/gowebdav"
 )
@@ -33,6 +33,22 @@ func main() {
 		fmt.Println("can not connect to webdav", err)
 		return
 	}
+	var memStats runtime.MemStats
+	runtime.ReadMemStats(&memStats)
+	fmt.Println("启动时内存占用", memStats.Alloc/1024/1024, "MB")
+
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		for {
+			select {
+			case <-ticker.C:
+				var memStats runtime.MemStats
+				runtime.ReadMemStats(&memStats)
+				fmt.Println("内存占用", memStats.Alloc/1024/1024, "MB")
+			}
+		}
+	}()
+
 	err = uploadToDav(cfg.LocalPath, cfg.RemotePath, client)
 	if err != nil {
 		fmt.Println("can not upload to webdav", err)
@@ -145,15 +161,14 @@ func uploadFile(client *webDavClient, p string, remotePath string) error {
 	var wg sync.WaitGroup
 
 	go func() {
-		maxReadSize := 1024 * 1024 * 32
-		err := readFile(p, maxReadSize, readerChan)
+		err := readFile(file, readerChan)
 		close(readerChan)
 		if err != nil {
 			fmt.Printf("read file filed, err: %v\n", err)
 		}
 	}()
 
-	for i := 0; i < 4; i++ {
+	for i := 0; i < 16; i++ {
 		wg.Add(1)
 		go uploadFileSplit(&wg, readerChan, client, remotePath)
 	}
@@ -162,32 +177,30 @@ func uploadFile(client *webDavClient, p string, remotePath string) error {
 	return nil
 }
 
-func readFile(path string, maxReadSize int, readerChan chan fileChunk) error {
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
+func readFile(f *os.File, readerChan chan fileChunk) error {
 	fi, err := f.Stat()
 	if err != nil {
 		return err
 	}
 
+	maxReadSize := int64(64 * 1024 * 1024)
+
 	// read file to channel
-	for i := 0; ; i++ {
-		buf := make([]byte, maxReadSize)
-		n, err := f.Read(buf)
-		if err != nil {
-			if err == io.EOF {
-				break
-			}
-			return err
+	for i := int64(0); ; i++ {
+		offset := i * maxReadSize
+		if offset >= fi.Size() {
+			break
+		}
+		readLen := maxReadSize
+		needRead := fi.Size() - offset
+		if needRead < maxReadSize {
+			readLen = needRead
 		}
 		readerChan <- fileChunk{
-			Offset: int64(i * maxReadSize),
-			Length: int64(n),
-			Buf:    buf[:n],
+			Offset: offset,
+			Length: readLen,
 			Size:   fi.Size(),
+			Reader: io.NewSectionReader(f, offset, readLen),
 		}
 	}
 	return nil
@@ -199,7 +212,7 @@ func uploadFileSplit(wg *sync.WaitGroup, readerChan chan fileChunk, client *webD
 		fmt.Printf("chunk: %d %d %d\n", chunk.Offset, chunk.Offset+chunk.Length, chunk.Size)
 		c := client.New()
 		c.SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", chunk.Offset, chunk.Offset+chunk.Length-1, chunk.Size))
-		err := c.WriteStream(remotePath, bytes.NewBuffer(chunk.Buf), 0644)
+		err := c.WriteStream(remotePath, chunk.Reader, 0644)
 		if err != nil {
 			fmt.Printf("upload file split failed, err: %v\n", err)
 		}
@@ -209,8 +222,8 @@ func uploadFileSplit(wg *sync.WaitGroup, readerChan chan fileChunk, client *webD
 type fileChunk struct {
 	Offset int64
 	Length int64
-	Buf    []byte
 	Size   int64
+	Reader io.Reader
 }
 
 type webDavClient struct {
