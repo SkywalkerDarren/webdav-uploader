@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"github.com/studio-b12/gowebdav"
 	"io"
 	"io/fs"
 	"net/http"
@@ -12,9 +13,6 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-	"time"
-
-	"github.com/studio-b12/gowebdav"
 )
 
 func main() {
@@ -33,21 +31,6 @@ func main() {
 		fmt.Println("can not connect to webdav", err)
 		return
 	}
-	var memStats runtime.MemStats
-	runtime.ReadMemStats(&memStats)
-	fmt.Println("启动时内存占用", memStats.Alloc/1024/1024, "MB")
-
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		for {
-			select {
-			case <-ticker.C:
-				var memStats runtime.MemStats
-				runtime.ReadMemStats(&memStats)
-				fmt.Println("内存占用", memStats.Alloc/1024/1024, "MB")
-			}
-		}
-	}()
 
 	err = uploadToDav(cfg.LocalPath, cfg.RemotePath, client)
 	if err != nil {
