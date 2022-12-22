@@ -4,18 +4,21 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
-	"github.com/studio-b12/gowebdav"
 	"io"
 	"io/fs"
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
+
+	"github.com/studio-b12/gowebdav"
 )
 
 func main() {
+
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := initCmd()
 	if cfg == nil {
@@ -32,7 +35,7 @@ func main() {
 		return
 	}
 
-	err = uploadToDav(cfg.LocalPath, cfg.RemotePath, client)
+	err = uploadToDav(cfg.LocalPath, cfg.RemotePath, cfg.ExcludeRegex, client)
 	if err != nil {
 		fmt.Println("can not upload to webdav", err)
 		return
@@ -46,6 +49,7 @@ func initCmd() *Config {
 	flag.StringVar(&cfg.WebDavUrl, "url", "", "webdav url")
 	flag.StringVar(&cfg.User, "user", "", "user")
 	flag.StringVar(&cfg.Password, "pwd", "", "password")
+	flag.StringVar(&cfg.ExcludeRegex, "exclude", "", "exclude path regex")
 	flag.Parse()
 	if cfg.LocalPath == "" {
 		fmt.Println("local path is empty")
@@ -67,18 +71,26 @@ func initCmd() *Config {
 		fmt.Println("password is empty")
 		return nil
 	}
+	if cfg.ExcludeRegex != "" {
+		_, err := regexp.Compile(cfg.ExcludeRegex)
+		if err != nil {
+			fmt.Println("exclude regex is invalid")
+			return nil
+		}
+	}
 	return cfg
 }
 
 type Config struct {
-	WebDavUrl  string
-	User       string
-	Password   string
-	LocalPath  string
-	RemotePath string
+	WebDavUrl    string
+	User         string
+	Password     string
+	LocalPath    string
+	RemotePath   string
+	ExcludeRegex string
 }
 
-func uploadToDav(localPath string, remotePath string, client *webDavClient) error {
+func uploadToDav(localPath string, remotePath string, excludeRegex string, client *webDavClient) error {
 	localPath = filepath.Clean(localPath)
 
 	stat, err := os.Stat(localPath)
@@ -94,6 +106,11 @@ func uploadToDav(localPath string, remotePath string, client *webDavClient) erro
 			relativePath := p[len(localPath)+1:]
 			if localPath == "." {
 				relativePath = p
+			}
+
+			if match, _ := regexp.Match(excludeRegex, []byte(relativePath)); len(excludeRegex) != 0 && match {
+				fmt.Println("exclude:", relativePath)
+				return nil
 			}
 
 			if info.IsDir() {
