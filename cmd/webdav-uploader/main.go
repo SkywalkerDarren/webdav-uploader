@@ -23,6 +23,7 @@ func main() {
 	http.DefaultTransport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	cfg := initCmd()
 	if cfg == nil {
+		os.Exit(1)
 		return
 	}
 	client := &webDavClient{
@@ -33,6 +34,7 @@ func main() {
 	err := client.New().Connect()
 	if err != nil {
 		fmt.Println("can not connect to webdav", err)
+		os.Exit(1)
 		return
 	}
 
