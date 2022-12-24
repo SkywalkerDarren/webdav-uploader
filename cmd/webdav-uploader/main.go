@@ -1,9 +1,11 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"github.com/studio-b12/gowebdav"
 	"io"
 	"io/fs"
 	"net/http"
@@ -13,8 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
-
-	"github.com/studio-b12/gowebdav"
+	"time"
 )
 
 func main() {
@@ -38,6 +39,7 @@ func main() {
 	err = uploadToDav(cfg.LocalPath, cfg.RemotePath, cfg.ExcludeRegex, client)
 	if err != nil {
 		fmt.Println("can not upload to webdav", err)
+		os.Exit(1)
 		return
 	}
 }
@@ -168,12 +170,29 @@ func uploadFile(client *webDavClient, p string, remotePath string) error {
 		}
 	}()
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	startTime := time.Now()
 	for i := 0; i < 16; i++ {
 		wg.Add(1)
-		go uploadFileSplit(&wg, readerChan, client, remotePath)
+		go uploadFileSplit(&wg, readerChan, client, remotePath, ctx, cancel)
 	}
 
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		c := client.New()
+		err := c.Remove(remotePath)
+		if err != nil {
+			return err
+		}
+		return err
+	}
+	endTime := time.Now()
+	fileStat, _ := file.Stat()
+	// calculate the speed in MB/s
+	speed := float64(fileStat.Size()) / 1024.0 / 1024.0 / endTime.Sub(startTime).Seconds()
+	fmt.Printf("upload file %s to %s, avg speed: %f MB/s\n", p, remotePath, speed)
 	return nil
 }
 
@@ -197,6 +216,7 @@ func readFile(f *os.File, readerChan chan fileChunk) error {
 			readLen = needRead
 		}
 		readerChan <- fileChunk{
+			Index:  i,
 			Offset: offset,
 			Length: readLen,
 			Size:   fi.Size(),
@@ -206,20 +226,53 @@ func readFile(f *os.File, readerChan chan fileChunk) error {
 	return nil
 }
 
-func uploadFileSplit(wg *sync.WaitGroup, readerChan chan fileChunk, client *webDavClient, remotePath string) {
+func uploadFileSplit(
+	wg *sync.WaitGroup,
+	readerChan <-chan fileChunk,
+	client *webDavClient,
+	remotePath string,
+	ctx context.Context,
+	cancel context.CancelFunc,
+) {
 	defer wg.Done()
 	for chunk := range readerChan {
-		fmt.Printf("chunk: %d %d %d\n", chunk.Offset, chunk.Offset+chunk.Length, chunk.Size)
-		c := client.New()
-		c.SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d", chunk.Offset, chunk.Offset+chunk.Length-1, chunk.Size))
-		err := c.WriteStream(remotePath, chunk.Reader, 0644)
-		if err != nil {
-			fmt.Printf("upload file split failed, err: %v\n", err)
+
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		retryMax := 10
+		startTime := time.Now()
+		success := false
+		for retry := 0; retry < retryMax; retry++ {
+			c := client.New()
+			c.SetHeader("Content-Range", fmt.Sprintf("bytes %d-%d/%d",
+				chunk.Offset, chunk.Offset+chunk.Length-1, chunk.Size))
+			err := c.WriteStream(remotePath, chunk.Reader, 0644)
+			if err != nil {
+				continue
+			} else {
+				success = true
+				endTime := time.Now()
+				// calculate speed in MB/s
+				speed := float64(chunk.Length) / 1024 / 1024 / endTime.Sub(startTime).Seconds()
+				fmt.Printf("Index: %d, chunk: %d %d %d uploaded, speed: %f MB/s\n",
+					chunk.Index, chunk.Offset, chunk.Offset+chunk.Length, chunk.Size, speed)
+				break
+			}
+		}
+		if !success {
+			fmt.Printf("Index: %d, chunk: %d %d %d upload failed\n",
+				chunk.Index, chunk.Offset, chunk.Offset+chunk.Length, chunk.Size)
+			cancel()
 		}
 	}
 }
 
 type fileChunk struct {
+	Index  int64
 	Offset int64
 	Length int64
 	Size   int64
